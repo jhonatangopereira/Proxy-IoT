@@ -9,22 +9,24 @@
 #include <stdio.h>
 #include <string.h>
 // bibliotecas do ESP32
+#include "cJSON.h"
 #include "driver/gpio.h"
+#include "driver/i2c.h"
+#include "esp_event_loop.h"
+#include "esp_log.h"
+#include "esp_system.h"
+#include "esp_wifi.h"
+#include "freertos/event_groups.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_wifi.h"
-#include "esp_event_loop.h"
-#include "freertos/event_groups.h"
-#include "esp_system.h"
-#include "esp_log.h"
+#include "lwip/dns.h"
 #include "lwip/err.h"
+#include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
-#include "lwip/netdb.h"
-#include "lwip/dns.h"
 #include "nvs_flash.h"
-//bibliotecas do sensor MPU6050
-#include "driver/i2c.h"
+// #include "jsonlib.h"
+
 // constantes de acesso do servidor TCP
 #define SSID "Wokwi-GUEST"
 #define PASSPHARSE ""
@@ -50,11 +52,23 @@ static const char *TCP_TAG = "TCP";
 // variável global para o socket
 short int sock;
 
+SemaphoreHandle_t mutex;
+SemaphoreHandle_t binary;
+
 static EventGroupHandle_t wifi_event_group;
 const int CONNECTED_BIT = BIT0;
 // variáveis globais para o sensor MPU6050
 short int accel_x, accel_y, accel_z;
 
+struct accel_buffer {
+  short int x[60];
+  short int y[60];
+  short int z[60];
+};
+// instanciar struct accel_buffer
+struct accel_buffer *p_accel_buffer = NULL;
+static int buffer_index = 0;
+char *tx_buffer = NULL;
 
 // declaração de funções
 void app_main(void);
@@ -73,16 +87,21 @@ void app_main(void) {
   printf("%s >> app_main\n", CONFIG_TAG);
   // Inicializa o ESP32
   setup();
+  // Inicializa os semáforos
+  mutex = xSemaphoreCreateMutex();
+  binary = xSemaphoreCreateBinary();
+  // Inicializar o buffer
+  p_accel_buffer = (struct accel_buffer *) malloc(sizeof(struct accel_buffer));
   // Inicializa o sensor MPU6050
   init_mpu6050_sensor(PIN_SCL, PIN_SDA);
   // Inicializa conexão TCP com o servidor
   connect_proxy();
   // Cria a tarefa que lê os dados do sensor MPU6050
-  xTaskCreate(&read_mpu6050_sensor, "read_mpu6050_sensor", 4096, NULL, 5, NULL);
-  // Cria a tarefa que envia os dados para o servidor TCP
-  // xTaskCreate(&send_sensor_data_to_proxy, "send_sensor_data_to_proxy", 4096, NULL, 5, NULL);
+  xTaskCreate(&read_mpu6050_sensor, "read_mpu6050_sensor", 4096, NULL, 4, NULL);
   // Cria a tarefa que envia "alive" para o servidor TCP
-  // xTaskCreate(&send_alive_to_proxy, "send_alive_to_proxy", 4096, NULL, 5, NULL);
+  xTaskCreate(&send_alive_to_proxy, "send_alive_to_proxy", 2048, NULL, 5, NULL);
+  // Cria a tarefa que envia os dados para o servidor TCP
+  xTaskCreate(&send_sensor_data_to_proxy, "send_sensor_data_to_proxy", 4096, NULL, 5, NULL);
 }
 
 // Função de configuração
@@ -155,7 +174,7 @@ void connect_proxy(void) {
   
   xEventGroupWaitBits(wifi_event_group,CONNECTED_BIT,false,true,portMAX_DELAY);
 
-  int sock = socket(AF_INET, SOCK_STREAM, 0);
+  sock = socket(AF_INET, SOCK_STREAM, 0);
 
   if (sock < 0) {
     ESP_LOGE(SENSOR_TAG, "Unable to create socket: errno %d", errno);
@@ -212,7 +231,6 @@ void init_mpu6050_sensor(gpio_num_t scl, gpio_num_t sda) {
 void read_mpu6050_sensor(void) {
   printf("%s >> read_mpu6050_sensor\n", SENSOR_TAG);
   i2c_cmd_handle_t cmd;
-	vTaskDelay(200 / portTICK_PERIOD_MS);
 
 	cmd = i2c_cmd_link_create();
 	ESP_ERROR_CHECK(i2c_master_start(cmd));
@@ -233,7 +251,7 @@ void read_mpu6050_sensor(void) {
 
 	uint8_t data[14];
   while (1) {
-    // Tell the MPU6050 to position the internal register pointer to register MPU6050_ACCEL_XOUT_H.
+    // Diga ao MPU6050 para posicionar o ponteiro do registro interno no registro MPU6050_ACCEL_XOUT_H.
     cmd = i2c_cmd_link_create();
     ESP_ERROR_CHECK(i2c_master_start(cmd));
     ESP_ERROR_CHECK(i2c_master_write_byte(cmd, (I2C_ADDRESS << 1) | I2C_MASTER_WRITE, 1));
@@ -262,8 +280,21 @@ void read_mpu6050_sensor(void) {
     accel_y = (data[2] << 8) | data[3];
     accel_z = (data[4] << 8) | data[5];
     printf("%s >> accel_x: %d, accel_y: %d, accel_z: %d\n", SENSOR_TAG, accel_x, accel_y, accel_z);
-    // delay de 1 segundo
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+    // adicionando dados no buffer
+    p_accel_buffer->x[buffer_index] = accel_x;
+    p_accel_buffer->y[buffer_index] = accel_y;
+    p_accel_buffer->z[buffer_index] = accel_z;
+    printf("%s >> buffer_index: %d\n", SENSOR_TAG, buffer_index);
+    buffer_index++;
+    if (buffer_index == 60) {
+      buffer_index = 0;
+      vTaskResume(&send_sensor_data_to_proxy);
+      xSemaphoreGive(binary);
+    } else {
+      // delay de 0.5 segundo
+      vTaskDelay(500 / portTICK_PERIOD_MS);
+    }
   }
 }
 
@@ -271,29 +302,71 @@ void read_mpu6050_sensor(void) {
 // Função que envia dados para o servidor TCP
 void send_sensor_data_to_proxy(void *pvParam) {
   printf("%s >> send_sensor_data_to_proxy\n", TCP_TAG);
-
-  // Envia dados para o servidor
-  uint8_t value = 10;
-  char tx_buffer[128];
-  sprintf(tx_buffer, "%hhu", value);
-  printf("txbuffer: %s\n", tx_buffer);
-  printf("value: %d\n", value);
   printf("sock: %d\n", sock);
+
+  xSemaphoreTake(binary, portMAX_DELAY);
+
+  // envia dados para o servidor
+  tx_buffer = malloc(100000 * sizeof(char));
+  // constrói um JSON com as informações do accel_buffer e envia para o servidor
+  char *x = malloc(9999 * sizeof(char)), *y = malloc(9999 * sizeof(char)), *z = malloc(9999 * sizeof(char));
+  char *aux = malloc(10 * sizeof(char));
+  if (x == NULL || y == NULL || z == NULL || aux == NULL || tx_buffer == NULL) {
+    printf("Erro ao alocar memória!\n");
+    exit(1);
+  }
+
+  strcat(x, "[");
+  strcat(y, "[");
+  strcat(z, "[");
+  for (int i = 0; i < 59; i++) {
+    sprintf(aux, "%d, ", p_accel_buffer->x[i]);
+    strcat(x, aux);
+    sprintf(aux, "%d, ", p_accel_buffer->y[i]);
+    strcat(y, aux);
+    sprintf(aux, "%d, ", p_accel_buffer->z[i]);
+    strcat(z, aux);
+  }
+  sprintf(aux, "%d]", p_accel_buffer->x[59]);
+  strcat(x, aux);
+  sprintf(aux, "%d]", p_accel_buffer->y[59]);
+  strcat(y, aux);
+  sprintf(aux, "%d]", p_accel_buffer->z[59]);
+  strcat(z, aux);
+  sprintf(tx_buffer, "{\"x\": %s, \"y\": %s, \"z\": %s}", x, y, z);
+  printf("txbuffer: %s\n", tx_buffer);
+
   int err = send(sock, tx_buffer, strlen(tx_buffer), 0);
   if (err < 0) { ESP_LOGE(TCP_TAG, "Error occurred during sending: errno %d", errno); }
+  else { printf("Dados enviados com sucesso!\n"); }
 
-  vTaskDelay(1000 / portTICK_PERIOD_MS);
+  // limpar as variáveis
+  free(x);
+  free(y);
+  free(z);
+  free(tx_buffer);
+  free(aux);
 
-  if (sock != -1) {
-    ESP_LOGE(TCP_TAG, "Shutting down socket...");
-    shutdown(sock, 0);
-    close(sock);
-  }
+  xSemaphoreGive(binary);
   vTaskDelete(NULL);
 }
 
 void send_alive_to_proxy(void *pvParam) {
   printf("%s >> send_alive_to_proxy\n", TCP_TAG);
-  // delay de 10 segundos
-  vTaskDelay(10000 / portTICK_PERIOD_MS);
+  while (1) {
+    xSemaphoreTake(mutex, portMAX_DELAY);
+
+    char* alive_buffer = malloc(10 * sizeof(char));
+    sprintf(alive_buffer, "%s", "alive");
+    printf("alive_buffer: %s\n", alive_buffer);
+    int err = send(sock, alive_buffer, strlen(alive_buffer), 0);
+    if (err < 0) { ESP_LOGE(TCP_TAG, "Error occurred during sending: errno %d", errno); }
+    else { printf("ALIVE enviado com sucesso!\n"); }
+
+    free(alive_buffer);
+
+    xSemaphoreGive(mutex);
+    // delay de 10 segundos
+    vTaskDelay(10000 / portTICK_PERIOD_MS);
+  }
 }
