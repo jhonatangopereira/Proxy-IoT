@@ -97,7 +97,7 @@ void app_main(void) {
   // Inicializa conexão TCP com o servidor
   connect_proxy();
   // Cria a tarefa que lê os dados do sensor MPU6050
-  xTaskCreate(&read_mpu6050_sensor, "read_mpu6050_sensor", 4096, NULL, 4, NULL);
+  xTaskCreate(&read_mpu6050_sensor, "read_mpu6050_sensor", 4096, NULL, 5, NULL);
   // Cria a tarefa que envia "alive" para o servidor TCP
   xTaskCreate(&send_alive_to_proxy, "send_alive_to_proxy", 2048, NULL, 5, NULL);
   // Cria a tarefa que envia os dados para o servidor TCP
@@ -196,7 +196,7 @@ void connect_proxy(void) {
     ESP_LOGE(TCP_TAG, "Error occurred during sending: errno %d", errno);
   }
 
-  char rx_buffer[128];
+  char rx_buffer[4];
   int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
   if (len < 0) {
     // Erro ao receber dados
@@ -289,11 +289,10 @@ void read_mpu6050_sensor(void) {
     buffer_index++;
     if (buffer_index == 60) {
       buffer_index = 0;
-      vTaskResume(&send_sensor_data_to_proxy);
       xSemaphoreGive(binary);
     } else {
       // delay de 0.5 segundo
-      vTaskDelay(500 / portTICK_PERIOD_MS);
+      vTaskDelay(501 / portTICK_PERIOD_MS);
     }
   }
 }
@@ -301,69 +300,77 @@ void read_mpu6050_sensor(void) {
 /* Conexão TCP com Proxy */
 // Função que envia dados para o servidor TCP
 void send_sensor_data_to_proxy(void *pvParam) {
-  printf("%s >> send_sensor_data_to_proxy\n", TCP_TAG);
-  printf("sock: %d\n", sock);
+  while (1) {
+    printf("%s >> send_sensor_data_to_proxy\n", TCP_TAG);
+    printf("sock: %d\n", sock);
 
-  xSemaphoreTake(binary, portMAX_DELAY);
+    // xSemaphoreTake(mutex, portMAX_DELAY);
+    xSemaphoreTake(binary, portMAX_DELAY);
 
-  // envia dados para o servidor
-  tx_buffer = malloc(100000 * sizeof(char));
-  // constrói um JSON com as informações do accel_buffer e envia para o servidor
-  char *x = malloc(9999 * sizeof(char)), *y = malloc(9999 * sizeof(char)), *z = malloc(9999 * sizeof(char));
-  char *aux = malloc(10 * sizeof(char));
-  if (x == NULL || y == NULL || z == NULL || aux == NULL || tx_buffer == NULL) {
-    printf("Erro ao alocar memória!\n");
-    exit(1);
-  }
-
-  strcat(x, "[");
-  strcat(y, "[");
-  strcat(z, "[");
-  for (int i = 0; i < 59; i++) {
-    sprintf(aux, "%d, ", p_accel_buffer->x[i]);
+    // envia dados para o servidor
+    tx_buffer = malloc(100000 * sizeof(char));
+    // constrói um JSON com as informações do accel_buffer e envia para o servidor
+    char *x = malloc(9999 * sizeof(char)), *y = malloc(9999 * sizeof(char)), *z = malloc(9999 * sizeof(char));
+    char *aux = malloc(10 * sizeof(char));
+    if (x == NULL || y == NULL || z == NULL || aux == NULL || tx_buffer == NULL) {
+      printf("Erro ao alocar memória!\n");
+      exit(1);
+    }
+    // construindo o JSON
+    strcat(x, "[");
+    strcat(y, "[");
+    strcat(z, "[");
+    for (int i = 0; i < 59; i++) {
+      sprintf(aux, "%d, ", p_accel_buffer->x[i]);
+      strcat(x, aux);
+      sprintf(aux, "%d, ", p_accel_buffer->y[i]);
+      strcat(y, aux);
+      sprintf(aux, "%d, ", p_accel_buffer->z[i]);
+      strcat(z, aux);
+    }
+    sprintf(aux, "%d]", p_accel_buffer->x[59]);
     strcat(x, aux);
-    sprintf(aux, "%d, ", p_accel_buffer->y[i]);
+    sprintf(aux, "%d]", p_accel_buffer->y[59]);
     strcat(y, aux);
-    sprintf(aux, "%d, ", p_accel_buffer->z[i]);
+    sprintf(aux, "%d]", p_accel_buffer->z[59]);
     strcat(z, aux);
+    sprintf(tx_buffer, "{\"x\": %s, \"y\": %s, \"z\": %s}", x, y, z);
+    printf("txbuffer: %s\n", tx_buffer);
+
+    int err = send(sock, tx_buffer, strlen(tx_buffer), 0);
+    if (err < 0) { ESP_LOGE(TCP_TAG, "Error occurred during sending: errno %d", errno); }
+    else { printf("Dados enviados com sucesso!\n"); }
+
+    // limpar as variáveis
+    free(x);
+    free(y);
+    free(z);
+    free(tx_buffer);
+    free(aux);
+
+    xSemaphoreGive(mutex);
+    // xSemaphoreGive(binary);
   }
-  sprintf(aux, "%d]", p_accel_buffer->x[59]);
-  strcat(x, aux);
-  sprintf(aux, "%d]", p_accel_buffer->y[59]);
-  strcat(y, aux);
-  sprintf(aux, "%d]", p_accel_buffer->z[59]);
-  strcat(z, aux);
-  sprintf(tx_buffer, "{\"x\": %s, \"y\": %s, \"z\": %s}", x, y, z);
-  printf("txbuffer: %s\n", tx_buffer);
-
-  int err = send(sock, tx_buffer, strlen(tx_buffer), 0);
-  if (err < 0) { ESP_LOGE(TCP_TAG, "Error occurred during sending: errno %d", errno); }
-  else { printf("Dados enviados com sucesso!\n"); }
-
-  // limpar as variáveis
-  free(x);
-  free(y);
-  free(z);
-  free(tx_buffer);
-  free(aux);
-
-  xSemaphoreGive(binary);
-  vTaskDelete(NULL);
 }
 
+// Função que envia "alive" para o servidor TCP
 void send_alive_to_proxy(void *pvParam) {
   printf("%s >> send_alive_to_proxy\n", TCP_TAG);
   while (1) {
     xSemaphoreTake(mutex, portMAX_DELAY);
 
-    char* alive_buffer = malloc(10 * sizeof(char));
-    sprintf(alive_buffer, "%s", "alive");
-    printf("alive_buffer: %s\n", alive_buffer);
-    int err = send(sock, alive_buffer, strlen(alive_buffer), 0);
+    int err = send(sock, "alive", 5, 0);
     if (err < 0) { ESP_LOGE(TCP_TAG, "Error occurred during sending: errno %d", errno); }
     else { printf("ALIVE enviado com sucesso!\n"); }
-
-    free(alive_buffer);
+    // receber "ok"
+    char rx_buffer[4];
+    int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+    if (len < 0) { ESP_LOGE(TCP_TAG, "recv failed: errno %d", errno); }
+    else {
+      rx_buffer[len] = 0; // Receber dado de retorno
+      if (strcmp(rx_buffer, "ok") == 0) printf("Recebido: %s\n", rx_buffer);
+      else printf("Falha no recebimento!\n");
+    }
 
     xSemaphoreGive(mutex);
     // delay de 10 segundos
