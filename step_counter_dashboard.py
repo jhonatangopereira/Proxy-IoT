@@ -1,75 +1,102 @@
-from flask import Flask, render_template, request
+from flask import Flask
+from multiprocessing import Process
+
 import argparse
 import dash
-import socket
 import json
-import time
-from multiprocessing import Process
 import numpy as np
-import threading
+import pandas as pd
+import socket
+
 
 app_flask = Flask(__name__)
 app_dash = dash.Dash(__name__, server=app_flask)
-
-# Layout do aplicativo Dash
-app_dash.layout = dash.html.Div([
-    dash.html.H1("Calculadora de Gasto Calórico"),
-    dash.html.Label("Digite seu peso (Kg):"),
-    dash.dcc.Input(id='weight-input', type='number', value= 0),
-    dash.html.Div(id='output-calories'),
-    dash.dcc.Graph(id='calories-graph')
-])
-
-# Dados iniciais para o gráfico
-initial_data = {'distance': 0, 'speed': 0, 'calories': 0}
-esp32_data = {"acceleration": {"x": [], "y": [], "z": []}}
 
 # Inicializando o servidor Flask
 @app_flask.route('/')
 def index():
     return app_dash.index()
 
+# Layout do aplicativo Dash
+app_dash.layout = dash.html.Div([
+    dash.html.H1("Calculadora de Gasto Calórico"),
+    # dash.html.Button('Atualizar dados', id='atualizar-dados', n_clicks=0),
+    dash.html.Br(),
+    dash.html.Button('Limpar dados', id='limpar-dados', n_clicks=0),
+    dash.html.Br(),
+    dash.html.Label("Digite seu peso (Kg):\t", id='weight-label'),
+    dash.dcc.Input(id='weight-input', type='number', value= 0),
+    dash.html.Br(),
+    dash.html.Br(),
+    dash.html.Div(id='output-distance'),
+    dash.html.Br(),
+    dash.html.Div(id='output-speed'),
+    dash.html.Br(),
+    dash.html.Div(id='output-caloriesperminute'),
+    dash.html.Br(),
+    dash.html.Div(id='output-totalcalories'),
+    dash.dcc.Graph(id='calories-graph')
+])
+
+# Dados iniciais para o gráfico
+initial_data = {'distance': 0, 'speed': 0, 'calories': 0}
+
+# Botão para limpar dados do arquivo esp32_data.csv
+@app_dash.callback(
+    [dash.Output('weight-input', 'value')],
+    [dash.dependencies.Input('limpar-dados', 'n_clicks')],
+    [dash.State('weight-input', 'value')]
+)
+def clear_data(n_clicks, weight):
+    print("Limpar dados")
+    if n_clicks > 0:
+        esp32_data = pd.DataFrame(columns=["x", "y", "z"])
+        esp32_data.to_csv("esp32_data.csv", index=False)
+    return weight,
+
+# Botão para limpar dados do arquivo esp32_data.csv
+# @app_dash.callback(
+#     [dash.Output('weight-input', 'value')],
+#     [dash.dependencies.Input('atualizar-dados', 'n_clicks')],
+#     [dash.State('weight-input', 'value'),
+#      dash.State('weight-label', 'children')]
+# )
+# def update_data(n_clicks, weight, weight_label):
+#     print("Limpar dados")
+#     return weight,
+
 # Callback para atualizar a saída com o gasto calórico e o gráfico
 @app_dash.callback(
-    [dash.Output('output-calories', 'children'),
+    [dash.Output('output-distance', 'children'),
+     dash.Output('output-speed', 'children'),
+     dash.Output('output-caloriesperminute', 'children'),
+     dash.Output('output-totalcalories', 'children'),
      dash.Output('calories-graph', 'figure')],
     [dash.Input('weight-input', 'value')]
 )
 def update_calories(weight):
-    global esp32_data
-    accelerationX = np.abs(np.array(esp32_data["acceleration"]["x"])) / 100
-    accelerationY = np.abs(np.array(esp32_data["acceleration"]["y"])) / 100
-    accelerationZ = np.abs(np.array(esp32_data["acceleration"]["z"])) / 100
-
-    print(accelerationX)
-    print(accelerationY)
+    esp32_data = pd.read_csv("esp32_data.csv")
+    print(esp32_data)
+    accelerationX = np.abs(np.array(esp32_data["x"]))
+    accelerationY = np.abs(np.array(esp32_data["y"]))
+    accelerationZ = np.abs(np.array(esp32_data["z"]))
 
     # calcular velocidade a partir de aceleração nos eixos X e Y
     speed = np.sqrt(np.sum(accelerationX ** 2 + accelerationY ** 2))
-    print(speed)
 
     # Fórmula de gasto calórico
     caloric_expenditure = speed * weight * 0.0175
-    print(caloric_expenditure)
 
     # Convertendo para calorias por minuto
     caloric_expenditure_per_minute = caloric_expenditure * 60
-    print(caloric_expenditure_per_minute)
 
     # Distância percorrida (exemplo simples, ajuste conforme necessário)
     distance = speed * len(accelerationX) # Supondo que a distância seja proporcional à velocidade
-    print(distance)
 
-    # CORRIGIR TOTAL MINUTES PARA O TEMPO TOTAL RECEBIDO DO ESP32
     total_minutes = len(accelerationX)  # Número total de minutos
-    print(total_minutes)
 
     # Calculando o gasto calórico total
     caloric_expenditure_total = caloric_expenditure_per_minute * total_minutes
-    print(caloric_expenditure_total)
-
-    # Atualizando dados para o gráfico
-    # updated_data = {'Distancia': distance, 'Speed': speed, 'Calorias': caloric_expenditure_per_minute, 'Calorias total': caloric_expenditure_total}
 
     # Criando o gráfico de barras
     figure = {
@@ -83,9 +110,7 @@ def update_calories(weight):
         }
     }
 
-    #return f"Gasto calórico por minuto: {caloric_expenditure_per_minute:.2f} Cal", figure
-    #return f"Gasto calórico por minuto: {caloric_expenditure_per_minute:.2f} Cal  " f" | Distância percorrida: {distance:.2f} mts   " f" |  Velocidade: {speed:.2f} m/s", figure
-    return f" Distância percorrida: {distance:.2f} metros  |  Velocidade: {speed:.2f} m/s |  Gasto calórico por minuto: {caloric_expenditure_per_minute:.2f} Cal  |  Gasto calórico total: {caloric_expenditure_total:.2f} Cal", figure
+    return f" Distância percorrida: {distance:.2f} metros", f"Velocidade: {speed:.2f} m/s", f"Gasto calórico por minuto: {caloric_expenditure_per_minute:.2f} Cal", f"Gasto calórico total: {caloric_expenditure_total:.2f} Cal", figure
 
 def receive_data(ap):
     args = vars(ap.parse_args())
@@ -123,8 +148,6 @@ def receive_data(ap):
         sock.close()
         exit()
 
-    global esp32_data
-    
     # loop to listen to the server and receive data when is available
     while True:
         response_data = sock.recv(1024).decode("utf-8")
@@ -136,25 +159,25 @@ def receive_data(ap):
         print(data_json)
         print(data_json['x'])
 
-        # EXEMPLO X = [60 VALORES]
-        # PRA X = [30 VALORES]
+        esp32_data = pd.read_csv("esp32_data.csv")
+        print(esp32_data)
+
         x = list()
         y = list()
         z = list()
         for i in range(0, len(data_json['x']), 2):            
-            x.append((data_json['x'][i] + data_json['x'][i + 1]) / 2)
-            y.append((data_json['y'][i] + data_json['y'][i + 1]) / 2)
-            z.append((data_json['z'][i] + data_json['z'][i + 1]) / 2)
+            x.append((data_json['x'][i] + data_json['x'][i + 1]) / 2 / 100)
+            y.append((data_json['y'][i] + data_json['y'][i + 1]) / 2 / 100)
+            z.append((data_json['z'][i] + data_json['z'][i + 1]) / 2 / 100)
+        new_df = pd.DataFrame({"x": x, "y": y, "z": z})
+        print(new_df)
 
         # Atualizando dados para esp32_data
-        esp32_data["acceleration"]["x"].extend(x)
-        esp32_data["acceleration"]["y"].extend(y)
-        esp32_data["acceleration"]["z"].extend(z)
+        esp32_data = pd.concat([esp32_data, new_df], axis=0, ignore_index=True)
+        print(esp32_data)
 
-        print(esp32_data["acceleration"])
-
-        # Update the Dash app
-        # app_dash.callback_map.get('update-calories')(0)
+        # Salvando dados no esp32_data.csv
+        esp32_data.to_csv("esp32_data.csv", index=False)
 
 def run_flask():
     app_flask.run()
@@ -182,6 +205,7 @@ if __name__ == '__main__':
     # flask_process = threading.Thread(target=run_flask)
     # flask_process.start()
     
+    # Create a thread for the Flask app
     flask_process = Process(target=run_flask)
     flask_process.start()
 
@@ -190,9 +214,6 @@ if __name__ == '__main__':
     tcp_process.start()
     try:
         # receive_data(ap=ap)
-
-        # Create a thread for the Flask app
-
         # Wait for both processes to finish
         flask_process.join()
         tcp_process.join()
