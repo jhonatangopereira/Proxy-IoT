@@ -99,9 +99,9 @@ void app_main(void) {
   // Cria a tarefa que lê os dados do sensor MPU6050
   xTaskCreate(&read_mpu6050_sensor, "read_mpu6050_sensor", 4096, NULL, 5, NULL);
   // Cria a tarefa que envia "alive" para o servidor TCP
-  xTaskCreate(&send_alive_to_proxy, "send_alive_to_proxy", 2048, NULL, 5, NULL);
+  xTaskCreate(&send_alive_to_proxy, "send_alive_to_proxy", 4096, NULL, 5, NULL);
   // Cria a tarefa que envia os dados para o servidor TCP
-  xTaskCreate(&send_sensor_data_to_proxy, "send_sensor_data_to_proxy", 4096, NULL, 5, NULL);
+  xTaskCreate(&send_sensor_data_to_proxy, "send_sensor_data_to_proxy", 19999, NULL, 5, NULL);
 }
 
 // Função de configuração
@@ -276,9 +276,9 @@ void read_mpu6050_sensor(void) {
     ESP_ERROR_CHECK(i2c_master_cmd_begin(I2C_NUM_0, cmd, 1000 / portTICK_PERIOD_MS));
     i2c_cmd_link_delete(cmd);
 
-    accel_x = (data[0] << 8) | data[1];
-    accel_y = (data[2] << 8) | data[3];
-    accel_z = (data[4] << 8) | data[5];
+    accel_x = ((data[0] << 8) | data[1]) / 163.835;
+    accel_y = ((data[2] << 8) | data[3]) / 163.835;
+    accel_z = ((data[4] << 8) | data[5]) / 163.835;
     printf("%s >> accel_x: %d, accel_y: %d, accel_z: %d\n", SENSOR_TAG, accel_x, accel_y, accel_z);
 
     // adicionando dados no buffer
@@ -304,11 +304,10 @@ void send_sensor_data_to_proxy(void *pvParam) {
     printf("%s >> send_sensor_data_to_proxy\n", TCP_TAG);
     printf("sock: %d\n", sock);
 
-    // xSemaphoreTake(mutex, portMAX_DELAY);
     xSemaphoreTake(binary, portMAX_DELAY);
 
     // envia dados para o servidor
-    tx_buffer = malloc(100000 * sizeof(char));
+    tx_buffer = malloc(99999 * sizeof(char));
     // constrói um JSON com as informações do accel_buffer e envia para o servidor
     char *x = malloc(9999 * sizeof(char)), *y = malloc(9999 * sizeof(char)), *z = malloc(9999 * sizeof(char));
     char *aux = malloc(10 * sizeof(char));
@@ -316,6 +315,9 @@ void send_sensor_data_to_proxy(void *pvParam) {
       printf("Erro ao alocar memória!\n");
       exit(1);
     }
+    x[0] = 0;
+    y[0] = 0;
+    z[0] = 0;
     // construindo o JSON
     strcat(x, "[");
     strcat(y, "[");
@@ -343,13 +345,17 @@ void send_sensor_data_to_proxy(void *pvParam) {
 
     // limpar as variáveis
     free(x);
+    x = NULL;
     free(y);
+    y = NULL;
     free(z);
+    z = NULL;
     free(tx_buffer);
+    tx_buffer = NULL;
     free(aux);
+    aux = NULL;
 
     xSemaphoreGive(mutex);
-    // xSemaphoreGive(binary);
   }
 }
 
